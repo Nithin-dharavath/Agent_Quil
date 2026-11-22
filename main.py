@@ -1,7 +1,9 @@
+import re
 import operator
 from pathlib import Path
-from typing import TypedDict, Annotated, List
+from typing import TypedDict, Annotated, List, Literal
 
+from subgraph_image import subgraph_imagebulider
 from langchain_groq import ChatGroq
 from langchain_tavily import TavilySearch
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -26,6 +28,18 @@ class Plan(BaseModel):
     blog_title: str
     tasks: List[Task]
 
+class ImageSpec(BaseModel):
+    placeholder:str
+    filename:str
+    alt:str
+    caption:str
+    prompt:str
+    size:Literal["1024*1024", "1024*1536", "1536*1024"]
+    quality:Literal["low", "medium", "high"]
+
+class GloablImage(BaseModel):
+    images: List[ImageSpec]
+
 
 class WorkFlowState(TypedDict):
     user_input : str
@@ -34,6 +48,9 @@ class WorkFlowState(TypedDict):
     plan : Plan
     sections : Annotated[list[str], operator.add]
     final : str
+    image_details : Annotated[list[ImageSpec], operator.add]
+    with_image : GloablImage
+    full_images_md : str
 
 
 llm = ChatGroq(
@@ -41,11 +58,16 @@ llm = ChatGroq(
     temperature = 0
 )
 
+image_decide = ChatGroq(
+    model = "openai/gpt-oss-20b",
+    temperature = 0.3
+)
+
 research_tool = TavilySearch(max_results = 2, type = "general")
 
 str_llm = llm.with_structured_output(Plan, method="json_schema")
 search = llm.with_structured_output(ReSearch, method="json_schema")
-
+image_llm = image_decide.with_structured_output(GloablImage)
 
 def router_bot(state: WorkFlowState) -> dict:
     prompt = SystemMessage(
@@ -122,11 +144,9 @@ def worker_bot(payload : dict) -> dict:
     }
 
 
-import re
-
 def reducer_bot(state : WorkFlowState) -> dict:
     title = state["plan"].blog_title
-    body = "\n\n".join(state["sections"])
+    body = "\n\n".join(state["full_images_md"])
 
     final_md = f"# {title}\n\n{body}\n"
 
@@ -135,11 +155,14 @@ def reducer_bot(state : WorkFlowState) -> dict:
     if not safe_title:
         safe_title = "blog"
     filename = safe_title + ".md"
-    output_path = Path(filename)
+    output_dir = Path(__file__).resolve().parent/"Generated_blogs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / filename
     output_path.write_text(final_md, encoding="utf-8")
 
     return{
-        "final" : final_md
+        "full_images_md" : final_md
     }
 
 graph = StateGraph(WorkFlowState)
@@ -149,12 +172,14 @@ graph.add_node("research_bot", research_bot)
 graph.add_node("planner_bot", planner_bot)
 graph.add_node("worker_bot", worker_bot)
 graph.add_node("reducer_bot", reducer_bot)
+graph.add_node("subgraph_imagebulider", subgraph_imagebulider)
 
 graph.add_edge(START, "router_bot")
 graph.add_conditional_edges("router_bot", answerout)
 graph.add_edge("research_bot", "planner_bot")
 graph.add_conditional_edges("planner_bot", fanout)
-graph.add_edge("worker_bot", "reducer_bot")
+graph.add_edge("worker_bot", "subgraph_imagebulider")
+graph.add_edge("subgraph_imagebulider", "reducer_bot")
 graph.add_edge("reducer_bot", END)
 
 workflow = graph.compile()
@@ -162,3 +187,8 @@ workflow = graph.compile()
 inital_state = {"user_input" : "blog about google transformers", "sections" : []}
 final_state = workflow.invoke(inital_state, config={"max_concurrency" : 2})
 print(final_state)
+
+
+
+
+
