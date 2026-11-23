@@ -1,7 +1,7 @@
 import requests
 import os
 from dotenv import load_dotenv
-from main import WorkFlowState
+from schema import WorkFlowState
 from pathlib import Path
 
 load_dotenv()
@@ -43,18 +43,22 @@ def image_process(image):
         output_dir = Path(__file__).resolve().parent / "Generated_blogs" / "images"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        output_path = output_dir / Path(image.filename).name
+        filename = Path(image.filename).name
+
+        if not filename.lower().endswith(".png"):
+            filename += ".png"
+
+        output_path = output_dir / filename
 
         with open(output_path, "wb") as file:
             file.write(image_data)
         print("Image generated successfully!")
+        return True
 
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}")
+        return False
 
     except (KeyError, ValueError) as e:
         print(f"Unexpected image response: {e}")
-
-    return {
-        "message" : "successful image generation"
-    }
+        return False

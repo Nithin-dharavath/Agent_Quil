@@ -1,73 +1,18 @@
 import re
-import operator
+import os
 from pathlib import Path
-from typing import TypedDict, Annotated, List, Literal
 
 from subgraph_image import subgraph_imagebulider
-from langchain_groq import ChatGroq
-from langchain_tavily import TavilySearch
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from langgraph.types import Send
 from langgraph.graph import StateGraph, START, END
 
-from pydantic import BaseModel, Field
+from schema import WorkFlowState
+
+from llm_config import llm, search, research_tool, str_llm
 from dotenv import load_dotenv
 load_dotenv()
-
-
-class ReSearch(BaseModel):
-    queries: List[str]
-
-class Task(BaseModel):
-    task_id: int
-    task_title: str
-    task_description: str = Field(description = "what to cover ?")
-
-class Plan(BaseModel):
-    blog_title: str
-    tasks: List[Task]
-
-class ImageSpec(BaseModel):
-    placeholder:str
-    filename:str
-    alt:str
-    caption:str
-    prompt:str
-    size:Literal["1024*1024", "1024*1536", "1536*1024"]
-    quality:Literal["low", "medium", "high"]
-
-class GloablImage(BaseModel):
-    images: List[ImageSpec]
-
-
-class WorkFlowState(TypedDict):
-    user_input : str
-    research : ReSearch
-    researchAnswers : Annotated[list[str], operator.add]
-    plan : Plan
-    sections : Annotated[list[str], operator.add]
-    final : str
-    image_details : Annotated[list[ImageSpec], operator.add]
-    with_image : GloablImage
-    full_images_md : str
-
-
-llm = ChatGroq(
-    model = "openai/gpt-oss-120b",
-    temperature = 0
-)
-
-image_decide = ChatGroq(
-    model = "openai/gpt-oss-20b",
-    temperature = 0.3
-)
-
-research_tool = TavilySearch(max_results = 2, type = "general")
-
-str_llm = llm.with_structured_output(Plan, method="json_schema")
-search = llm.with_structured_output(ReSearch, method="json_schema")
-image_llm = image_decide.with_structured_output(GloablImage)
 
 def router_bot(state: WorkFlowState) -> dict:
     prompt = SystemMessage(
@@ -117,7 +62,7 @@ def planner_bot(state: WorkFlowState) -> dict :
 
 
 def fanout(state : WorkFlowState):
-    return [Send("worker_bot", {"task" : task, "plan" : state["plan"], "research" : state["researchAnswers"]}) for task in state["plan"].tasks]
+    return [Send("worker_bot", {"task" : task, "plan" : state["plan"], "research" : state.get("researchAnswers", [])}) for task in state["plan"].tasks]
 
 
 def worker_bot(payload : dict) -> dict:
@@ -146,11 +91,20 @@ def worker_bot(payload : dict) -> dict:
 
 def reducer_bot(state : WorkFlowState) -> dict:
     title = state["plan"].blog_title
-    body = "\n\n".join(state["full_images_md"])
+    body = "\n\n".join(state["sections"])
 
     final_md = f"# {title}\n\n{body}\n"
 
+    return{
+        "final" : final_md
+    }
+
+def output_bot(state:WorkFlowState) -> dict:
+    title = state["plan"].blog_title
+    final_md = state["temp_images_md"]
+
     # Sanitize title so it is a safe filename on every OS (no :, *, ?, ", <, >, |, /, \\)
+
     safe_title = re.sub(r"[^\w\-]+", "_", title, flags=re.UNICODE).strip("_").lower()
     if not safe_title:
         safe_title = "blog"
@@ -162,7 +116,7 @@ def reducer_bot(state : WorkFlowState) -> dict:
     output_path.write_text(final_md, encoding="utf-8")
 
     return{
-        "full_images_md" : final_md
+        "final_images_md" : final_md
     }
 
 graph = StateGraph(WorkFlowState)
@@ -173,22 +127,20 @@ graph.add_node("planner_bot", planner_bot)
 graph.add_node("worker_bot", worker_bot)
 graph.add_node("reducer_bot", reducer_bot)
 graph.add_node("subgraph_imagebulider", subgraph_imagebulider)
+graph.add_node("output_bot", output_bot)
 
 graph.add_edge(START, "router_bot")
 graph.add_conditional_edges("router_bot", answerout)
 graph.add_edge("research_bot", "planner_bot")
 graph.add_conditional_edges("planner_bot", fanout)
-graph.add_edge("worker_bot", "subgraph_imagebulider")
-graph.add_edge("subgraph_imagebulider", "reducer_bot")
-graph.add_edge("reducer_bot", END)
+graph.add_edge("worker_bot", "reducer_bot")
+graph.add_edge("reducer_bot", "subgraph_imagebulider")
+graph.add_edge("subgraph_imagebulider", "output_bot")
+graph.add_edge("output_bot", END)
 
 workflow = graph.compile()
 
-inital_state = {"user_input" : "blog about google transformers", "sections" : []}
+inital_state = {"user_input" : "blog about OpenAI ChatGPT Evolution from 2022 to 2026", "sections" : []}
 final_state = workflow.invoke(inital_state, config={"max_concurrency" : 2})
 print(final_state)
-
-
-
-
 
