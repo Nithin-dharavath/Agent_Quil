@@ -3,7 +3,6 @@ from typing import TypedDict, Annotated, List, Literal
 
 import operator
 
-
 class ReSearch(BaseModel):
     queries: List[str]
 
